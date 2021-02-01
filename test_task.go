@@ -41,7 +41,7 @@ func main() {
 	fmt.Println("iter-count: ", iterCount)
 	fmt.Println("arr-size: ", arrSize)
 
-	in := make(chan Task)
+	in := make(chan interface{})
 
 	for i := 0; i < writers; i++ {
 		wg.Add(1) // Здесь добавляется один ждун
@@ -50,26 +50,40 @@ func main() {
 
 	go func() {
 		var completeRoutinesCounter = 0 // Счетчик завершенных горутин
-		var task Task
 		for {
-			task = <-in
-			if task.IsLast { // Используем метку последней задачи для опреления момента заверщения работы горутины
-				completeRoutinesCounter++
-			}
+			something := <-in
 
-			if arrSize > 0 {
-				min, median, max, Err := processNumbers(task.Numbers)
-				if Err != nil {
-					fmt.Println("An error occurred:", Err)
+			switch value := something.(type) {
+			case Processable:
+				if arrSize > 0 {
+					min, median, max, Err := processNumbers(value.Numbers())
+					if Err != nil {
+						fmt.Println("An error occurred:", Err)
+					}
+					fmt.Println(value.WriterIdentifier(), value.CreatedTime(), min, median, max)
+				} else {
+					// Этот случай теоретически недостижим, но он предусмотрен на случай
+					// если кто-то оменит установренное мною прерывание вычислений с длинной массива 0
+					fmt.Println(value.WriterIdentifier(), value.CreatedTime(),
+						"no data processing results of empty array")
 				}
-				fmt.Println(task.WriterIdentifier, task.CreatedTime, min, median, max)
-			} else {
-				// Этот случай теоретически недостижим, но он предусмотрен на случай
-				// если кто-то оменит установренное мною прерывание вычислений с длинной массива 0
-				fmt.Println(task.WriterIdentifier, task.CreatedTime, "no data processing results of empty array")
+				break
+			case bool:
+				if value { // Используем метку завершения для определения момента прекращения работы горутины
+					completeRoutinesCounter++
+				}
+				break
+			case error: // Обработка ошибок, возникающих во время генерации
+				fmt.Println(fmt.Println("Data generation error occurred:", value))
+				// Важный момент! Получение ошибки не считается признаком окончания передачи данных
+				// Такое решение принято для того, чтобы была только одна точка завершения горутины
+				// Кроме того в теории дает сбора и обработки множества ошибок из одной горутины
+				break
 			}
 
 			if completeRoutinesCounter == writers {
+				close(in) // Закрываем канал
+				in = nil
 				return
 			}
 		}
@@ -95,25 +109,63 @@ func validate(writers int, iterCount int, arrSize int) error {
 	return nil
 }
 
+type Processable interface {
+	CreatedTime() time.Time
+	WriterIdentifier() string
+	Numbers() *[]int // Используем указатель на массим, чтобы не копировать массив при передаче
+}
+
 type Task struct {
-	CreatedTime      time.Time
-	WriterIdentifier string
-	Numbers          []int
-	IsLast           bool // Это признак того, что задача является последней от данной горутины
+	createdTime      time.Time
+	writerIdentifier string
+	numbers          *[]int
+}
+
+func (task Task) CreatedTime() time.Time {
+	return task.createdTime
+}
+
+func (task Task) WriterIdentifier() string {
+	return task.writerIdentifier
+}
+
+func (task Task) Numbers() *[]int {
+	return task.numbers
 }
 
 /*
 Этот ментод создает задачу
 и помещает ее в канал
 */
-func write(out chan<- Task, num int, index int, arrSize int) {
-	for i := 0; i < num; i++ {
-		out <- Task{time.Now(),
-			"Routine" + strconv.Itoa(index),
-			getNumbers(arrSize),
-			i == num-1}
+func write(out chan<- interface{}, num int, index int, arrSize int) {
+
+	id := routineId(index)
+
+	if num >= 0 && arrSize >= 0 {
+		for i := 0; i < num; i++ {
+			out <- func() Processable { // Здесь я решил использовать обертку из анонимной функции, чтобы
+				// в случае изменения интерфейса отследить ошибку компиляции
+				return Task{time.Now(),
+					id,
+					getNumbers(arrSize)}
+			}() // Эти круглые скобки нужны, чтобы передавалось значение функции, а не сама функция
+		}
 	}
-	defer wg.Done() // После завершения генерации нужного колическтва задач убираем одного ждуна.
+	if num < 0 { // Отправка в канал ошибок генерации.
+		out <- errors.New("routine " + id + " got illegal num value:" + strconv.Itoa(num))
+	}
+	if arrSize < 0 {
+		out <- errors.New("routine " + id + " got illegal arrSize value:" + strconv.Itoa(arrSize))
+	}
+	// такая компоновка if else выбрана для того, чтобы была единая точка завершения горутины и снятия блокировки
+	//При этом мы можем вообщить обо всех ошибках
+
+	out <- true     // Признак завершения передачи
+	defer wg.Done() // После завершения генерации нужного количества задач убираем одного ждуна.
+}
+
+func routineId(index int) string {
+	return "Routine" + strconv.Itoa(index)
 }
 
 /*
@@ -121,12 +173,12 @@ func write(out chan<- Task, num int, index int, arrSize int) {
 и наполняет его случайными целыми числами
 */
 
-func getNumbers(size int) []int {
+func getNumbers(size int) *[]int {
 	var slice = make([]int, size)
 	for i := 0; i < size; i++ {
 		slice[i] = rand.Int()
 	}
-	return slice
+	return &slice
 }
 
 /*
@@ -134,11 +186,12 @@ func getNumbers(size int) []int {
 или генерит ошибку, если передается пустой массив,
 так как в пустом массиве невозможно вычислить заданные значения
 */
-func processNumbers(numbers []int) (int, int, int, error) {
-	sort.Ints(numbers)
-	var size = len(numbers)
+func processNumbers(numbers *[]int) (int, int, int, error) {
+	slice := *numbers
+	sort.Ints(slice)
+	var size = len(slice)
 	if size == 0 {
 		return 0, 0, 0, errors.New("illegal arrays size 0")
 	}
-	return numbers[0], numbers[size/2], numbers[size-1], nil
+	return slice[0], slice[size/2], slice[size-1], nil
 }
