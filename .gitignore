@@ -1,0 +1,12 @@
+# Default ignored files
+/workspace.xml
+
+.idea
+target/
+build/
+
+*.exe
+
+### Logging ###
+log/
+*.log
