@@ -74,11 +74,13 @@ func main() {
 				}
 				break
 			case error: // Обработка ошибок, возникающих во время генерации
-				fmt.Println(fmt.Println("Data generation error occurred:", value))
+				fmt.Println("Data generation error occurred:", value)
 				// Важный момент! Получение ошибки не считается признаком окончания передачи данных
 				// Такое решение принято для того, чтобы была только одна точка завершения горутины
 				// Кроме того в теории дает сбора и обработки множества ошибок из одной горутины
 				break
+			default:
+				fmt.Println("Unexpected value received:", value)
 			}
 
 			if completeRoutinesCounter == writers {
