@@ -27,7 +27,7 @@ func main() {
 
 	Err := validate(writers, iterCount, arrSize)
 	if Err != nil {
-		fmt.Println(fmt.Println("Validation error occurred:", Err))
+		fmt.Println("Validation error occurred:", Err)
 		return
 	}
 
